@@ -26,7 +26,7 @@ class StepOutput(BaseModel):
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_ids: list[str] | None = None
     thinking_blocks: list[dict[str, Any]] | None = None
-    reasoning_content: list[dict[str, Any]] | None = None
+    reasoning_content: str = ""
 
     """State of the environment at the end of the step"""
     extra_info: dict[str, Any] = {}
@@ -51,6 +51,7 @@ class TrajectoryStep(TypedDict):
     execution_time: float
     query: list[dict[str, Any]]
     extra_info: dict[str, Any]
+    reasoning_content: str
 
 
 # required fields go here
@@ -71,7 +72,7 @@ class HistoryItem(_HistoryItem, total=False):
     tags: list[str]
     cache_control: dict[str, Any] | None
     thinking_blocks: list[dict[str, Any]] | None
-    reasoning_content: list[dict[str, Any]] | None
+    reasoning_content: str
 
     """HistoryProcessors can add these tags to enable special processing"""
 

@@ -1230,6 +1230,7 @@ class DefaultAgent(AbstractAgent):
                 "state": step.state,
                 "query": step.query,
                 "extra_info": step.extra_info,
+                "reasoning_content": step.reasoning_content
             },
         )
         self.trajectory.append(trajectory_step)
