@@ -687,6 +687,8 @@ class LiteLLMModel(AbstractModel):
                 del message["cache_control"]
             if "thinking_blocks" in message:
                 del message["thinking_blocks"]
+            if "reasoning_content" in message:
+                del message["reasoning_content"]
         input_tokens: int = litellm.utils.token_counter(
             messages=messages_no_cache_control,
             model=self.custom_tokenizer["identifier"] if self.custom_tokenizer is not None else self.config.name,
@@ -769,6 +771,11 @@ class LiteLLMModel(AbstractModel):
                 and response.choices[i].message.thinking_blocks  # type: ignore
             ):
                 output_dict["thinking_blocks"] = response.choices[i].message.thinking_blocks  # type: ignore
+            if (
+                hasattr(response.choices[i].message, "reasoning_content")  # type: ignore
+                and response.choices[i].message.reasoning_content  # type: ignore
+            ):
+                output_dict["reasoning_content"] = response.choices[i].message.reasoning_content  # type: ignore
             outputs.append(output_dict)
         self._update_stats(input_tokens=input_tokens, output_tokens=output_tokens, cost=cost)
         return outputs
@@ -855,6 +862,8 @@ class LiteLLMModel(AbstractModel):
                 message = {"role": role, "content": history_item["content"], "tool_calls": tool_calls}
                 if thinking_blocks := history_item.get("thinking_blocks"):
                     message["thinking_blocks"] = thinking_blocks
+                if reasoning_content := history_item.get("reasoning_content"):
+                    message["reasoning_content"] = reasoning_content
             else:
                 message = {"role": role, "content": history_item["content"]}
             if "cache_control" in history_item:

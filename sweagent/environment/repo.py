@@ -31,7 +31,7 @@ def _get_git_reset_commands(base_commit: str) -> list[str]:
     return [
         "git status",
         "git restore .",
-        f"git reset --hard {base_commit}",
+        f"git reset --hard remotes/origin/{base_commit}",
         "git clean -fdq",
     ]
 
