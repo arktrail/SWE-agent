@@ -687,8 +687,8 @@ class LiteLLMModel(AbstractModel):
                 del message["cache_control"]
             if "thinking_blocks" in message:
                 del message["thinking_blocks"]
-            if "reasoning_content" in message:
-                del message["reasoning_content"]
+            # if "reasoning_content" in message:
+            #     del message["reasoning_content"]
         input_tokens: int = litellm.utils.token_counter(
             messages=messages_no_cache_control,
             model=self.custom_tokenizer["identifier"] if self.custom_tokenizer is not None else self.config.name,
