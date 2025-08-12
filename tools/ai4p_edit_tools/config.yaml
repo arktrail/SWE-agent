@@ -1,0 +1,59 @@
+tools:
+  apply_patch:
+    signature: "apply_patch"
+    docstring: |
+      Applies a SEARCH-REPLACE style patch to one or more files.
+
+      Here's an example of how to edit two files. Carefully observe the format expected:
+      1. The apply_patch command reads the patch from stdin
+      2. Every search-replace block must be wrapped between <diff> and </diff> tags
+      3. The first line inside the <diff> tag should always be of the form `### path/to/some/file.py` -- the 3 leading hashes are important and the filepath must be relative to the current directory or absolute path
+      4. After the filename header, you should have a single line with `<<<<<<< SEARCH`
+      5. Then write the lines you want to delete -- exactly, including the right whitespaces. Do NOT include line numbers here, they're only shown for your convenience.
+      6. After that a single line: `=======`
+      7. The lines you want to replace the search-block with. We'll replace this EXACTLY as you pass, so be sure about getting the indentation right.
+      8. Single line with `>>>>>>> REPLACE`
+      9. Finally, close with edit </diff>
+
+      ```
+      apply_patch <<'EOF_12345678'
+      <diff>
+      ### path/to/some/file.py
+      <<<<<<< SEARCH
+      some
+      pre
+      existing
+      lines
+        with
+          exact
+            indentation
+
+          and whitespaces!
+      and remember, NO LINE NUMBERS!
+      =======
+      the
+      new
+      content
+      again
+        with
+          exact
+              indentation that you want
+      and remember, NO LINE NUMBERS!
+      >>>>>>> REPLACE
+      </diff>
+
+      <diff>
+      ### foo/bar.py
+      <<<<<<< SEARCH
+      =======
+      new
+      contents
+      for
+      a new file or an existing-but-empty-file
+      >>>>>>> REPLACE
+      </diff>
+      EOF_12345678
+      ```
+
+      Note that since this is basically just a tool you can call directly from bash, be sure to handle escaping special characters such as backticks/quotes etc!
+      Also, please, do NOT include line numbers in the patch. They are shown to you only for your convenience.

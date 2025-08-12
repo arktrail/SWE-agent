@@ -12,8 +12,6 @@ ls -l
  ```
 ```
 
-For models that support function calling, we instead recommend using the `FunctionCallingParser`.
-
 To use a specific parser, set the `parse_function` key in your tool config to the `type` field of the parser.
 
 ```yaml
@@ -24,13 +22,7 @@ agent:
             type: "thought_action"
 ```
 
-Or from the command line: `--agent.tools.parse_function.type=thought_action`.
-
-!!! note "Describing available tools"
-    If you do not use the `FunctionCallingParser`, you need to include documentation about the available tools
-    in your system prompt. You can use the `{{command_docs}}` variable to include the automatically generated
-    documentation or explicitly describe the available tools.
-    Also see [#1130](https://github.com/SWE-agent/SWE-agent/issues/1130).
+Or from the command line: `--agent.tools.parse_function.type=thought_action`
 """
 
 import json
@@ -39,14 +31,16 @@ import textwrap
 from abc import ABC, abstractmethod
 from shlex import quote
 from textwrap import dedent
-from typing import Any, Literal
+from typing import Literal
 
 from jinja2 import Template
-from pydantic import BaseModel
-
-from sweagent.exceptions import FormatError, FunctionCallingFormatError
+from sweagent.exceptions import (
+    FormatError,
+    FunctionCallingFormatError,
+)
 from sweagent.tools.commands import Command
 from sweagent.tools.utils import _should_quote
+from pydantic import BaseModel
 
 
 class AbstractParseFunction(ABC):
@@ -58,7 +52,9 @@ class AbstractParseFunction(ABC):
     error_message: str
 
     @abstractmethod
-    def __call__(self, model_response, commands: list[Command], strict=False) -> tuple[str, str]:
+    def __call__(
+        self, model_response, commands: list[Command], strict=False
+    ) -> tuple[str, str]:
         raise NotImplementedError
 
     @property
@@ -159,8 +155,82 @@ class ThoughtActionParser(AbstractParseFunction, BaseModel):
                 stack.append(match)
         if last_valid_block:
             start, end = last_valid_block
-            thought = model_response["message"][: start.start()] + model_response["message"][end.end() :]
+            thought = (
+                model_response["message"][: start.start()]
+                + model_response["message"][end.end() :]
+            )
             return thought, model_response["message"][start.end() : end.start()]
+        msg = "No action found in model response."
+        raise FormatError(msg)
+
+
+class LlamaThinkingActionParser(AbstractParseFunction, BaseModel):
+    """
+    Expects the model response to be a discussion followed by a command wrapped in backticks.
+    Example:
+    Let's look at the files in the current directory.
+    ```
+    ls -l
+    ```
+    """
+
+    error_message: str = dedent("""\
+    Your output was not formatted correctly. You must always include one discussion and one command as part of your response. Make sure you do not have multiple discussion/command tags.
+    Please make sure your output precisely matches the following format:
+    DISCUSSION
+    Discuss here with yourself about what your planning and what you're going to do in this step.
+
+    ```
+    command(s) that you're going to run
+    ```
+    """)
+
+    type: Literal["llama_thinking_action"] = "llama_thinking_action"
+    """Type for (de)serialization. Do not change."""
+
+    def __call__(self, model_response: dict, commands: list[Command], strict=False):
+        before_thought = ""
+        after_thought = model_response["message"]
+        if "<explicit_reasoning>" in model_response["message"]:
+            if "</explicit_reasoning>" in str(model_response["message"]):
+                before_thought, after_thought = str(model_response["message"]).rsplit(
+                    "</explicit_reasoning>", 1
+                )
+            elif "# DISCUSSION" in str(model_response["message"]):
+                before_thought, after_thought = str(model_response["message"]).rsplit(
+                    "# DISCUSSION", 1
+                )
+            elif "# COMMAND" in str(model_response["message"]):
+                before_thought, after_thought = str(model_response["message"]).rsplit(
+                    "# COMMAND", 1
+                )
+            else:
+                after_thought = str(model_response["message"])
+
+        if "<|reasoning_thinking_end|>" not in after_thought:
+            # we might be using the omni model, so just fall back to the default parser
+            (thought, action) = ThoughtActionParser()(
+                {"message": after_thought}, commands, strict
+            )
+            thought = before_thought + thought
+            return (thought, action)
+
+        thought, rest = after_thought.rsplit("<|reasoning_thinking_end|>", 1)
+        code_block_pat = re.compile(r"^```(\S*)\s*\n|^```\s*$", re.MULTILINE)
+        stack = []
+        first_valid_block = None
+        for match in code_block_pat.finditer(rest):
+            if stack and not match.group(1):  # Closing of a code block
+                start = stack.pop()
+                # Check if it's not nested within another block
+                if not stack:
+                    first_valid_block = (start, match)
+                    break
+            elif match.group(1) is not None:  # Opening of a code block
+                stack.append(match)
+        if first_valid_block:
+            start, end = first_valid_block
+            return thought, rest[start.end() : end.start()]
         msg = "No action found in model response."
         raise FormatError(msg)
 
@@ -178,12 +248,23 @@ class XMLThoughtActionParser(AbstractParseFunction, BaseModel):
     error_message: str = dedent("""\
     Your output was not formatted correctly. You must always include one discussion and one command as part of your response. Make sure you do not have multiple discussion/command tags.
     Please make sure your output precisely matches the following format:
+
+    <terminal_interaction>
+    <discussion>
+    Discuss here with yourself about what your planning for future and what you're going to do in this step.
+    </discussion>
+    <command>
+    command that you will run
+    </command>
+    </terminal_interaction>
     """)
 
     type: Literal["xml_thought_action"] = "xml_thought_action"
     """Type for (de)serialization. Do not change."""
 
-    def __call__(self, model_response: dict, commands: list[Command], strict=False) -> tuple[str, str]:
+    def __call__(
+        self, model_response: dict, commands: list[Command], strict=False
+    ) -> tuple[str, str]:
         """
         Parses the action from the output of the API call.
         We assume that the action is the last code block in the model_response.
@@ -199,126 +280,65 @@ class XMLThoughtActionParser(AbstractParseFunction, BaseModel):
 
         In this case, only the second code block will be parsed as the action.
         """
-        if "<command>" not in model_response["message"] or "</command>" not in model_response["message"]:
-            msg = "No action found in model response."
+        if (
+            "<terminal_interaction>" not in model_response["message"]
+            or "</terminal_interaction>" not in model_response["message"]
+        ):
+            msg = "Format error: Please wrap your command between <terminal_interaction><discussion></discussion><command></command></terminal_interaction> tags."
             raise FormatError(msg)
+
+        response = (
+            model_response["message"]
+            # Take everything to the right of the *first* `<|reasoning_thinking_end|>` tag:
+            .split("<|reasoning_thinking_end|>", 1)[-1]
+            # Take everything from the left of the *first* `</terminal_interaction>` tag:
+            .split("</terminal_interaction>")[0]
+            # Append the `</terminal_interaction>` tag - note that if we didn't have that
+            # before in the string, we're now adding it:
+            + "</terminal_interaction>"
+        )
+
+        # If we still have a `<|reasoning_thinking_end|>` tag, our output must have contained more than
+        # one such tag. We'll let the model retry:
+        if "<|reasoning_thinking_end|>" in response:
+            from projects.agents.sweagent.sweagent.agent.agents import (
+                _RetryWithoutOutput,
+            )
+
+            raise _RetryWithoutOutput()
+
+        # mutate the model response so that it ends where it's supposed to end
+        if "<|reasoning_thinking_end|>" in model_response["message"]:
+            model_response["message"] = (
+                model_response["message"].split("<|reasoning_thinking_end|>", 1)[0]
+                + "<|reasoning_thinking_end|>"
+                + response
+            )
+        else:
+            model_response["message"] = response
+
+        if "<command>" not in response or "</command>" not in response:
+            msg = "Format error: No action found in model response.\nPlease wrap your command between <terminal_interaction><discussion></discussion><command></command></terminal_interaction> tags."
+            raise FormatError(msg)
+
         # `action` is everything between the last <command> and </command> tags
-        start_action = model_response["message"].rfind("<command>") + len(
+        start_action = response.rfind("<command>") + len(
             "<command>"
         )  # start after the last <command> tag
-        end_thought = model_response["message"].rfind("<command>")  # end before the last <command> tag
-        end_action = model_response["message"].rfind("</command>")  # end before the last </command> tag
-        restart_thought = model_response["message"].rfind("</command>") + len(
+        end_thought = response.rfind("<command>")  # end before the last <command> tag
+        end_action = response.rfind("</command>")  # end before the last </command> tag
+        restart_thought = response.rfind("</command>") + len(
             "</command>"
         )  # start after the last </command> tag
         # `thought` is everything not in between <command> and </command> tags (includes after the last </command> tag)
-        action = model_response["message"][start_action:end_action]
-        thought = model_response["message"][:end_thought] + model_response["message"][restart_thought:]
+        action = response[start_action:end_action]
+        thought = response[:end_thought] + response[restart_thought:]
+        thought = model_response["message"].split("<|reasoning_thinking_end|>")[0]
+        # so that the same logic works for non-reasoning model
+        if "<|reasoning_thinking_end|>" in model_response["message"]:
+            thought = thought + "<|reasoning_thinking_end|>"
 
         return thought.strip(), action.strip()
-
-
-FN_REGEX_PATTERN = r"<function=([^>]+)>\n(.*?)</function>"
-FN_PARAM_REGEX_PATTERN = r"<parameter=([^>]+)>(.*?)</parameter>"
-
-
-class XMLFunctionCallingParser(AbstractParseFunction, BaseModel):
-    """
-    Expects the model response to be a tool calling format, where the command and parameters are specified
-    in XML tags.
-    Example:
-    Let's look at the files in the current directory.
-    <function=bash>
-    <parameter=command>find /testbed -type f -name "_discovery.py"</parameter>
-    </function>
-    """
-
-    error_message: str = dedent("""\
-    {%- if error_code == "missing" -%}
-    Your last output did not use any tool calls!
-    Please make sure your output includes exactly _ONE_ function call!
-    If you think you have already resolved the issue, please submit your changes by running the `submit` command.
-    If you think you cannot solve the problem, please run `submit`.
-    Else, please continue with a new tool call!
-    {%- elif error_code == "multiple" -%}
-    Your last output included multiple tool calls!
-    Please make sure your output includes a thought and exactly _ONE_ function call.
-    {%- elif error_code == "unexpected_arg" -%}
-    Your action could not be parsed properly: {{exception_message}}.
-    Make sure your function call doesn't include any extra arguments that are not in the allowed arguments, and only use the allowed commands.
-    {%- else -%}
-    Your action could not be parsed properly: {{exception_message}}.
-    {% endif %}
-    """)
-
-    type: Literal["xml_function_calling"] = "xml_function_calling"
-
-    def __call__(self, model_response: dict, commands: list[Command], strict=False) -> tuple[str, str]:
-        fn_match = re.search(FN_REGEX_PATTERN, model_response["message"], re.DOTALL)
-        if not fn_match:
-            msg = "No function found in model response."
-            raise FormatError(msg)
-        fn_name = fn_match.group(1).strip()
-
-        # Handle different names in SWE-agent vs. SWE-gym
-        if fn_name == "execute_bash":
-            fn_name = "bash"
-        if fn_name == "finish":
-            fn_name = "submit"
-
-        fn_body = fn_match.group(2)
-        thought = model_response["message"][: fn_match.start()] + model_response["message"][fn_match.end() :]
-        thought = thought.strip()
-
-        commands_dict = {c.name: c for c in commands}
-        command = commands_dict.get(fn_name)
-        if not command:
-            msg = f"Command '{fn_name}' not found in list of available commands."
-            raise FormatError(msg)
-
-        params_dict = {
-            param[0]: re.sub(r"^\n|\n$", "", param[1])
-            for param in re.findall(FN_PARAM_REGEX_PATTERN, fn_body, re.DOTALL)
-        }
-
-        if "view_range" in params_dict:
-            # Check that value is format as [x, y]
-            v = params_dict["view_range"]
-            if isinstance(v, str):
-                if not re.match(r"\[\d+,\s*\d+\]", v):
-                    msg = f"view_range must be in the format [<start>, <end>], got {v}."
-                    raise FormatError(msg)
-                params_dict["view_range"] = json.loads(v)
-
-        # Check if all required arguments are there
-        required_args = {arg.name for arg in command.arguments if arg.required}
-        missing_args = required_args - params_dict.keys()
-        if missing_args:
-            msg = f"Required argument(s) missing: {', '.join(missing_args)}"
-            raise FormatError(msg)
-
-        # Check if all arguments are valid
-        valid_args = {arg.name for arg in command.arguments}
-        extra_args = set(params_dict.keys()) - valid_args
-        if command.end_name:
-            # sometimes the model will include the end_name in the arguments - just ignore it
-            extra_args.discard(command.end_name)
-        if extra_args:
-            msg = f"Unexpected argument(s): {', '.join(extra_args)}"
-            raise FormatError(msg)
-
-        # Format arguments using their individual argument_format
-        formatted_args = {
-            arg.name: Template(arg.argument_format).render(
-                value=quote(params_dict[arg.name])
-                if _should_quote(params_dict[arg.name], command)
-                else params_dict[arg.name]
-            )
-            if arg.name in params_dict
-            else ""
-            for arg in command.arguments
-        }
-        return thought, command.invoke_format.format(**formatted_args).strip()
 
 
 class EditFormat(ThoughtActionParser, BaseModel):
@@ -361,7 +381,9 @@ class Identity(AbstractParseFunction, BaseModel):
     type: Literal["identity"] = "identity"
     """Type for (de)serialization. Do not change."""
 
-    def __call__(self, model_response: dict, commands: list[Command], strict=False) -> tuple[str, str]:
+    def __call__(
+        self, model_response: dict, commands: list[Command], strict=False
+    ) -> tuple[str, str]:
         """
         This doesn't do any parsing. It just returns the model response as the thought and action.
         """
@@ -419,17 +441,12 @@ class FunctionCallingParser(AbstractParseFunction, BaseModel):
         if extra_args:
             msg = f"Unexpected argument(s): {', '.join(extra_args)}"
             raise FunctionCallingFormatError(msg, "unexpected_arg")
-
-        def get_quoted_arg(value: Any) -> str:
-            if isinstance(value, str):
-                return quote(value) if _should_quote(value, command) else value
-            # See https://github.com/SWE-agent/SWE-agent/issues/1159
-            if value is None:
-                return ""
-            return value
-
         formatted_args = {
-            arg.name: Template(arg.argument_format).render(value=get_quoted_arg(values[arg.name]))
+            arg.name: Template(arg.argument_format).render(
+                value=quote(values[arg.name])
+                if _should_quote(values[arg.name], command)
+                else values[arg.name]
+            )
             if arg.name in values
             else ""
             for arg in command.arguments
@@ -515,7 +532,9 @@ class JsonParser(AbstractParseFunction, BaseModel):
                     msg = f"Command '{data_command['name']}' not found in list of available commands."
                     raise FormatError(msg)
                 # In non-strict mode, just join command name with argument values
-                return thought, " ".join([data_command["name"], *data_command.get("arguments", {}).values()])
+                return thought, " ".join(
+                    [data_command["name"], *data_command.get("arguments", {}).values()]
+                )
 
             # Format arguments using their individual argument_format
             formatted_args = {}
@@ -525,7 +544,9 @@ class JsonParser(AbstractParseFunction, BaseModel):
                         value = data_command["arguments"][arg.name]
                         if _should_quote(value, command):
                             value = quote(value)
-                        formatted_args[arg.name] = Template(arg.argument_format).render(value=value)
+                        formatted_args[arg.name] = Template(arg.argument_format).render(
+                            value=value
+                        )
                     elif strict and arg.required:
                         msg = f"Required argument '{arg.name}' missing for command '{command.name}'"
                         raise FormatError(msg)
@@ -538,70 +559,119 @@ class JsonParser(AbstractParseFunction, BaseModel):
             raise FormatError(msg)
 
 
-class BashCodeBlockParser(AbstractParseFunction, BaseModel):
-    """Executes all commands in ```bash code blocks."""
+FN_REGEX_PATTERN = r"<function name=\"?([^\">]+)\"?>\n(.*?)</function>"
+FN_PARAM_REGEX_PATTERN = r"<parameter name=\"?([^\">]+)\"?>(.*?)</parameter>"
+
+
+class XMLFunctionCallingParser(AbstractParseFunction, BaseModel):
+    """
+    Expects the model response to be a tool calling format, where the command and parameters are specified
+    in XML tags.
+    Example:
+    Let's look at the files in the current directory.
+    <function name=bash>
+    <parameter name=command>find /testbed -type f -name "_discovery.py"</parameter>
+    </function>
+    """
 
     error_message: str = dedent("""\
-    No bash code blocks were detected in your output.
-    You need to include at least one bash code block in your output.
-
-    It must follow this format exactly to be valid:
-    ```bash
-    cmd arg1 arg2 ...
-    ...
-
-    Other types of code blocks (e.g. python, rust, none, etc.) won't be executed. Only bash.
+    {%- if error_code == "missing" -%}
+    Your last output did not use any tool calls!
+    Please make sure your output includes exactly _ONE_ function call!
+    If you think you have already resolved the issue, please submit your changes by running the `submit` command.
+    If you think you cannot solve the problem, please run `submit`.
+    Else, please continue with a new tool call!
+    {%- elif error_code == "multiple" -%}
+    Your last output included multiple tool calls!
+    Please make sure your output includes a thought and exactly _ONE_ function call.
+    {%- elif error_code == "unexpected_arg" -%}
+    Your action could not be parsed properly: {{exception_message}}.
+    Make sure your function call doesn't include any extra arguments that are not in the allowed arguments, and only use the allowed commands.
+    {%- else -%}
+    Your action could not be parsed properly: {{exception_message}}.
+    {% endif %}
     """)
 
-    type: Literal["all_bash_code_blocks"] = "all_bash_code_blocks"
+    type: Literal["xml_function_calling"] = "xml_function_calling"
 
-    def __call__(self, model_response: dict, commands: list[Command], strict=False):
-        """Parses the action from the output of the API call.
-        We assume that model output is a JSON object with the following fields:
-        """
-        pattern = re.compile(r"```bash\n(.*?)\n```", re.DOTALL)
-        matches = pattern.findall(model_response["message"])
-        if not matches:
-            msg = "No bash code blocks were detected in your output."
-            raise FormatError(msg)
-        thouht = pattern.sub("<extracted_code_block>", model_response["message"])
-        action = "\n".join(matches)
-        return thouht, action
-
-
-class SingleBashCodeBlockParser(AbstractParseFunction, BaseModel):
-    """Executes all commands in ```bash code blocks."""
-
-    error_message: str = dedent("""\
-    We did not detect the right number of bash code blocks in your output.
-    You need to include EXACTLY ONE bash code block in your output.
-
-    It must follow this format exactly to be valid:
-    ```bash
-    cmd arg1 arg2 ...
-    ```
-    """)
-
-    type: Literal["single_bash_code_block"] = "single_bash_code_block"
-
-    def __call__(self, model_response: dict, commands: list[Command], strict=False):
-        """Parses the action from the output of the API call.
-        We assume that model output is a JSON object with the following fields:
-        """
-        pattern = re.compile(r"```bash\n(.*?)\n```", re.DOTALL)
-        matches = pattern.findall(model_response["message"])
-        if not matches:
-            msg = "No bash code blocks were detected in your output."
-            raise FormatError(msg)
-        if len(matches) > 1:
-            msg = (
-                "We detected multiple bash code blocks in your output. "
-                "You need to include EXACTLY ONE bash code block in your output."
+    def __call__(
+        self, model_response: dict, commands: list[Command], strict=False
+    ) -> tuple[str, str]:
+        # for reasoning model and to make sure we take only the first function call
+        response = (
+            model_response["message"]
+            .split("<|reasoning_thinking_end|>", 1)[-1]
+            .split("</function>")[0]
+            + "</function>"
+        )
+        if "<|reasoning_thinking_end|>" in response:
+            from projects.agents.sweagent.sweagent.agent.agents import (
+                _RetryWithoutOutput,
             )
+
+            raise _RetryWithoutOutput()
+
+        # overwrite the response so that the history also contains only the first function call
+        model_response["message"] = response
+        # /for reasoning model...
+
+        fn_match = re.search(FN_REGEX_PATTERN, response, re.DOTALL)
+        if not fn_match:
+            msg = "No function found in model response."
             raise FormatError(msg)
-        thouht = pattern.sub("<extracted_code_block>", model_response["message"])
-        action = "\n".join(matches)
-        return thouht, action
+        fn_name = fn_match.group(1).strip()
+        fn_body = fn_match.group(2)
+        thought = response[: fn_match.start()] + response[fn_match.end() :]
+        thought = thought.strip()
+
+        commands_dict = {c.name: c for c in commands}
+        command = commands_dict.get(fn_name)
+        if not command:
+            msg = f"Command '{fn_name}' not found in list of available commands."
+            raise FormatError(msg)
+
+        params_dict = {
+            param[0]: param[1].strip()
+            for param in re.findall(FN_PARAM_REGEX_PATTERN, fn_body, re.DOTALL)
+        }
+        if "view_range" in params_dict:
+            # Check that value is format as [x, y]
+            v = params_dict["view_range"]
+            if isinstance(v, str):
+                if not re.match(r"^\[\d+,\s*-?\d+\]$", v):
+                    msg = f"view_range must be in the format [<start>, <end>], got {v}."
+                    raise FormatError(msg)
+                params_dict["view_range"] = json.loads(v)
+
+        # Check if all required arguments are there
+        required_args = {arg.name for arg in command.arguments if arg.required}
+        missing_args = required_args - params_dict.keys()
+        if missing_args:
+            msg = f"Required argument(s) missing: {', '.join(missing_args)}"
+            raise FormatError(msg)
+
+        # Check if all arguments are valid
+        valid_args = {arg.name for arg in command.arguments}
+        extra_args = set(params_dict.keys()) - valid_args
+        if command.end_name:
+            # sometimes the model will include the end_name in the arguments - just ignore it
+            extra_args.discard(command.end_name)
+        if extra_args:
+            msg = f"Unexpected argument(s): {', '.join(extra_args)}"
+            raise FormatError(msg)
+
+        # Format arguments using their individual argument_format
+        formatted_args = {
+            arg.name: Template(arg.argument_format).render(
+                value=quote(params_dict[arg.name])
+                if _should_quote(params_dict[arg.name], command)
+                else params_dict[arg.name]
+            )
+            if arg.name in params_dict
+            else ""
+            for arg in command.arguments
+        }
+        return thought, command.invoke_format.format(**formatted_args).strip()
 
 
 ParseFunction = (
@@ -609,11 +679,10 @@ ParseFunction = (
     | ThoughtActionParser
     | ActionOnlyParser
     | XMLThoughtActionParser
-    | XMLFunctionCallingParser
     | FunctionCallingParser
     | EditFormat
     | Identity
     | JsonParser
-    | BashCodeBlockParser
-    | SingleBashCodeBlockParser
+    | LlamaThinkingActionParser
+    | XMLFunctionCallingParser
 )

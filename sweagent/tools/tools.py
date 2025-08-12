@@ -1,39 +1,35 @@
-"""
-This module contains the configuration for the tools that are made available to the agent.
-
-The `ToolConfig` class is used to configure the tools that are available to the agent.
-The `ToolHandler` class is used to handle the tools that are available to the agent.
-"""
-
 import asyncio
 import json
-import os
 import re
 from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
-from swerex.runtime.abstract import Command as RexCommand
-from swerex.runtime.abstract import UploadRequest
-from typing_extensions import Self
-
 from sweagent.environment.swe_env import SWEEnv
 from sweagent.tools.bundle import Bundle
 from sweagent.tools.commands import BASH_COMMAND, Command
-from sweagent.tools.parsing import FunctionCallingParser, JsonParser, ParseFunction
-from sweagent.tools.utils import _guard_multiline_input, generate_command_docs
+from sweagent.tools.parsing import (
+    FunctionCallingParser,
+    JsonParser,
+    ParseFunction,
+)
+from sweagent.tools.utils import (
+    _guard_multiline_input,
+    generate_command_docs,
+)
 from sweagent.utils.log import get_logger
+from swerex.runtime.abstract import (
+    Command as RexCommand,
+    UploadRequest,
+)
+from pydantic import BaseModel, Field
+from typing_extensions import Self
 
 
 class ToolFilterConfig(BaseModel):
-    """Filter out commands that are blocked by the environment
-    (for example interactive commands like `vim`).
-    """
-
-    blocklist_error_template: str = "Operation '{{action}}' is not supported by this environment."
-    """The error template to use when a command is blocked."""
-
+    blocklist_error_template: str = (
+        "Operation '{{action}}' is not supported by this environment."
+    )
     blocklist: list[str] = [
         "vim",
         "vi",
@@ -47,7 +43,6 @@ class ToolFilterConfig(BaseModel):
         "make",
     ]
     """Block any command that starts with one of these"""
-
     blocklist_standalone: list[str] = [
         "python",
         "python3",
@@ -64,7 +59,6 @@ class ToolFilterConfig(BaseModel):
         "su",
     ]
     """Block any command that matches one of these exactly"""
-
     block_unless_regex: dict[str, str] = {
         "radare2": r"\b(?:radare2)\b.*\s+-c\s+.*",
         "r2": r"\b(?:radare2)\b.*\s+-c\s+.*",
@@ -73,32 +67,10 @@ class ToolFilterConfig(BaseModel):
 
 
 class ToolConfig(BaseModel):
-    """Configuration for the tools that are made available to the agent."""
-
     filter: ToolFilterConfig = ToolFilterConfig()
-    """Filter out commands that are blocked by the environment
-    (for example interactive commands like `vim`).
-    """
-
     bundles: list[Bundle] = Field(default_factory=list)
-    """The tool bundles to load."""
 
-    propagate_env_variables: list[str] = []
-    """Environment variables to propagate to the environment.
-    This is useful if you want to propagate API keys or similar from your own environment to the
-    environment in which the tools run.
-    IMPORTANT NOTE: The value of the environment variables can be read in debug log files,
-    so be careful with your API keys!
-    """
-
-    env_variables: dict[str, Any] = {
-        "PAGER": "cat",
-        "MANPAGER": "cat",
-        "LESS": "-R",
-        "PIP_PROGRESS_BAR": "off",
-        "TQDM_DISABLE": "1",
-        "GIT_PAGER": "cat",
-    }
+    env_variables: dict[str, Any] = {}
     """Shorthand to set environment variables for the tools, effectively
     equivalent to adding `export VARNAME=value` to the `reset_commands`.
     """
@@ -107,23 +79,15 @@ class ToolConfig(BaseModel):
     """Populate the registry with these variables. Will be written out as json in the registry file."""
 
     submit_command: str = "submit"
-    """The command/tool to use to submit the solution."""
 
     parse_function: ParseFunction = Field(default_factory=FunctionCallingParser)
-    """The action parser that is responsible for parsing the model output into a thought and action.
-    """
 
     enable_bash_tool: bool = True
-    """Whether to enable the bash tool in addition to the other tools specified in bundles."""
 
     format_error_template: str = None  # type: ignore
     """Defaults to format_error_template in ParseFunction"""
 
     command_docs: str = None  # type: ignore
-    """Automatically generated documentation generated based on
-    the loaded tool bundles.
-    """
-
     multi_line_command_endings: dict[str, str] = {}
     submit_command_end_name: str | None = None
 
@@ -157,10 +121,6 @@ class ToolConfig(BaseModel):
 
     @cached_property
     def state_commands(self) -> list[str]:
-        """This property returns the state commands from all bundles.
-        State commands are commands that are used to get the state of the environment
-        (e.g., the current working directory).
-        """
         return [bundle.state_command for bundle in self.bundles if bundle.state_command]
 
     # todo: move to ToolHandler?
@@ -199,16 +159,19 @@ class ToolConfig(BaseModel):
         # for caching:
         commands = self.commands
         multi_line_command_endings = {
-            command.name: command.end_name for command in commands if command.end_name is not None
+            command.name: command.end_name
+            for command in commands
+            if command.end_name is not None
         }
         self.tools
 
         # assert not self.enable_bash_tool and parse_function is FunctionCallingParser or JsonParser
-        if not self.enable_bash_tool and not (
-            isinstance(self.parse_function, FunctionCallingParser) or isinstance(self.parse_function, JsonParser)
-        ):
-            msg = f"Bash tool can only be disabled if {FunctionCallingParser.type} parser or {JsonParser.type} parser is used."
-            raise ValueError(msg)
+        # if not self.enable_bash_tool and not (
+        #     isinstance(self.parse_function, FunctionCallingParser)
+        #     or isinstance(self.parse_function, JsonParser)
+        # ):
+        #     msg = f"Bash tool can only be disabled if {FunctionCallingParser.type} parser or {JsonParser.type} parser is used."
+        #     raise ValueError(msg)
 
         self.multi_line_command_endings = multi_line_command_endings
         self.command_docs = generate_command_docs(
@@ -255,38 +218,60 @@ class ToolHandler:
 
     def reset(self, env: SWEEnv) -> None:
         self.logger.info("Resetting tools")
-        env_variables = self.config.env_variables.copy() | {
-            var: os.getenv(var) for var in self.config.propagate_env_variables
-        }
-        env.set_env_variables(env_variables)
-        env.write_file("/root/.swe-agent-env", json.dumps(self.config.registry_variables))
-        env.write_file("/root/state.json", "{}")
-        env.communicate(" && ".join(self._reset_commands), check="raise", timeout=self.config.install_timeout)
+        env.set_env_variables(self.config.env_variables)
+        env.write_file(
+            "/root/.swe-agent-env", json.dumps(self.config.registry_variables)
+        )
+        env.communicate(
+            " && ".join(self._reset_commands),
+            check="raise",
+            timeout=self.config.install_timeout,
+        )
 
     async def _upload_bundles(self, env: SWEEnv) -> None:
+        await env.deployment.runtime.execute(
+            RexCommand(
+                command="mkdir -p /root/tools",
+                shell=True,
+                check=True,
+                timeout=self.config.install_timeout,
+            )
+        )
         await asyncio.gather(
             *(
                 env.deployment.runtime.upload(
-                    UploadRequest(source_path=bundle.path.as_posix(), target_path=f"/root/tools/{bundle.path.name}")
+                    UploadRequest(
+                        source_path=bundle.path.as_posix(),
+                        target_path=f"/root/tools/{bundle.path.name}",
+                    )
                 )
                 for bundle in self.config.bundles
             )
         )
 
-    async def _is_command_available(self, env, command: str, env_vars: dict[str, str]) -> None:
+    async def _is_command_available(
+        self, env, command: str, env_vars: dict[str, str]
+    ) -> None:
         if command == "bash":
             return
         try:
             await env.deployment.runtime.execute(
-                RexCommand(command=f"which {command}", shell=True, check=True, env=env_vars)
+                RexCommand(
+                    command=f"which {command}", shell=True, check=True, env=env_vars
+                )
             )
         except Exception:
             msg = f"Tool {command} is not available in the container."
             raise RuntimeError(msg) from None
 
-    async def _check_available_commands(self, env: SWEEnv, env_vars: dict[str, str]) -> None:
+    async def _check_available_commands(
+        self, env: SWEEnv, env_vars: dict[str, str]
+    ) -> None:
         await asyncio.gather(
-            *(self._is_command_available(env, command.name, env_vars) for command in self.config.commands)
+            *(
+                self._is_command_available(env, command.name, env_vars)
+                for command in self.config.commands
+            )
         )
 
     def _install_commands(self, env: SWEEnv) -> None:
@@ -396,7 +381,8 @@ class ToolHandler:
         patterns = {
             k: v
             for k, v in self._command_patterns.items()
-            if k in self.config.multi_line_command_endings or k == self.config.submit_command
+            if k in self.config.multi_line_command_endings
+            or k == self.config.submit_command
         }
         matches = list()
         for _, pat in patterns.items():

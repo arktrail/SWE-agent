@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+
+import os
+from pathlib import Path
+import json
+
+os.system("_state_diff_state")
+state_path = Path("/root/state.json")
+if state_path.exists():
+    print(json.loads(state_path.read_text())["diff"])

@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+
+import os
+from api import FileResolver, EditStatus
+from aider_searchreplace import AiderSearchReplacePatcher
+
+
+def main():
+    fs = FileResolver(os.environ["ROOT"], os.getcwd())
+    patcher = AiderSearchReplacePatcher(fs)
+
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        lines.append(line)
+    patch = "\n".join(lines)
+
+    result, _ = patcher.apply_multi(patch)
+
+    if result.status in [EditStatus.APPLIED, EditStatus.APPLIED_WITH_ADJUSTMENTS]:
+        print("===========Message from patcher===========")
+        print("Your patch has been applied")
+        print("Here are the changes made in THIS edit:\n")
+        print("<diff>")
+        print(result.get_diff())
+        print("</diff>")
+
+        for fname, content in result.new_texts.items():
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write(content)
+        
+        print("\n\nPlease review if the above change is as intended and did not introduce duplicates, accidental deletes, syntax errors etc.")
+        print("===========/Message from patcher===========")
+    
+    elif result.status == EditStatus.PARTIALLY_APPLIED:
+        print("Your patch has not been applied. Some of the edits in your patch could have been applied, however there are some problematic edits as well. So to be safe we're rejecting all the changes. Please see the error messages:")
+        print(result.message)
+        print("\nNote that it is possible to apply other edits but we're not applying them to be safe. Please try again after fixing the edits. You probably want to review the file again and be sure about using correct indentation and punctuations etc. Also, it'll be better if you try to make one edit at a time.")
+        print()
+
+    elif result.status == EditStatus.NOT_APPLIED:
+        print("===========Message from patcher===========")
+        print("Your patch has NOT been applied. Please see the error messages:")
+        print(result.message)
+        print("\nPlease make sure you have opened the file and read the contents, including exact whitespace and punctuations etc. Please make sure that the snippet you're trying to replace is ACTUALLY visible to you and is not a figment of your imagination. If the file you're trying to edit is large, it might have been truncated, so make sure you are not basing your edits on top of incomplete information.")
+
+        print("###SWE-AGENT-RETRY-WITH-OUTPUT###")  # to tell swe-agent to just retry this message but not keep it in history
+
+    elif result.status == EditStatus.FAILED_TO_PARSE:
+        print("===========Message from patcher===========")
+        print("Your patch was malformed. Please follow the correct format for writing the patch.")
+        print(result.message)
+        print("===========/Message from patcher===========")
+        print("###SWE-AGENT-RETRY-WITHOUT-OUTPUT###")  # to tell swe-agent to just retry this message but not keep it in history
+    else:
+        print("This is a bug in the apply_patch tool, please try using something else.")
+
+
+if __name__ == "__main__":
+    main()

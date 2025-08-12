@@ -1,2 +1,4 @@
-tools: {}
-state_command: "_state_diff_state"
+tools:
+  show_diff:
+    signature: "show_diff"
+    docstring: "Shows the changes made so far in the session (you can use git commands for more control)"
